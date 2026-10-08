@@ -36,6 +36,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -55,6 +70,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -111,6 +127,7 @@ private class Tool(val name: String, val icon: Int, val min: Float, val max: Flo
 
 private const val ERASER = 3
 private const val SHAPE = 4 // shape tool; also selects, moves and resizes shapes and images
+private const val TEXT = 5  // text box tool: tap or drag on the paper to type; also moves, resizes and rotates text boxes
 private val SEL = 0xFF1B4FD8.toInt() // selection frame: always drawn over white paper
 private val TOOLS = listOf(
     Tool("Pen", R.drawable.ic_ink_pen, 0.5f, 24f, 3f),
@@ -118,13 +135,14 @@ private val TOOLS = listOf(
     Tool("Calligraphic pen", R.drawable.ic_nib_pen, 2f, 40f, 8f),
     Tool("Object eraser", R.drawable.ic_ink_eraser, 4f, 40f, 12f),
     Tool("Shape", 0, 1f, 30f, 3f), // icon follows the chosen shape; thickness is the outline
+    Tool("Text box", 0, 14f, 160f, 36f), // "thickness" is the font size
 )
 private val PALETTE = listOf(
     "Black" to 0xFF000000, "Blue" to 0xFF1565C0, "Red" to 0xFFC62828, "Green" to 0xFF2E7D32, "Orange" to 0xFFEF6C00,
     "Purple" to 0xFF6A1B9A, "Yellow" to 0xFFFFEB3B, "Teal" to 0xFF00ACC1, "Pink" to 0xFFE91E63,
     "White" to 0xFFFFFFFF, "Light gray" to 0xFFBDBDBD, "Dark gray" to 0xFF616161,
 ).map { it.first to it.second.toInt() }
-private val DEFAULT_COLORS = intArrayOf(0xFF000000.toInt(), 0xFFFFEB3B.toInt(), 0xFF1565C0.toInt(), 0xFF000000.toInt(), 0xFF000000.toInt()) // 3 = eraser (unused), 4 = shape outline
+private val DEFAULT_COLORS = intArrayOf(0xFF000000.toInt(), 0xFFFFEB3B.toInt(), 0xFF1565C0.toInt(), 0xFF000000.toInt(), 0xFF000000.toInt(), 0xFF000000.toInt()) // 3 = eraser (unused), 4 = shape outline, 5 = text
 
 private fun shapeIcon(kind: Int): ImageVector = when (kind) {
     0 -> Icons.Default.CropSquare
@@ -259,6 +277,14 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     val cache = remember { PageCache() }
     var tick by remember { mutableIntStateOf(0) }
     var erased by remember { mutableStateOf(emptySet<Item>()) }
+    // Text box tool: remembered style for new boxes, and the box being typed in. The page still holds the original (hidden while editing);
+    // a brand-new box is only added to the page when you finish with some text in it.
+    var tFont by remember { mutableIntStateOf(store.prefs.getInt("tfont", 0)) }
+    var tFlags by remember { mutableIntStateOf(store.prefs.getInt("tflags", 0)) } // 1 bold, 2 italic, 4 underline
+    var tAlign by remember { mutableIntStateOf(store.prefs.getInt("talign", 0)) }
+    var editing by remember { mutableStateOf<TextBox?>(null) }
+    var editOrig by remember { mutableStateOf<TextBox?>(null) }
+    var viewH by remember { mutableIntStateOf(0) }
 
     fun commit(p: PageState, items: List<Item>) { p.undo.addLast(p.items); p.redo.clear(); p.items = items; rev++ }
     fun saveAll() {
@@ -266,7 +292,29 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         store.saveThumb(note, pages[0].items)
         store.save(note.copy(title = title.trim(), modified = System.currentTimeMillis()))
     }
-    fun goto(i: Int) { cur = i; scrollY = 0f; selected = null }
+    fun newTextBox(x: Float, y: Float, w: Float) = TextBox("", colors[TEXT], widths[TEXT], tFlags, tFont, tAlign, x, y, w)
+
+    fun startEdit(t: TextBox, existing: Boolean) {
+        editing = t; editOrig = if (existing) t else null
+        selected = null
+        hidden = if (existing) setOf(t) else emptySet()
+    }
+
+    /** Ends typing: an empty box is dropped (an existing one is removed), otherwise the change is committed and the box stays selected. */
+    fun finishEdit() {
+        val e = editing ?: return
+        val o = editOrig
+        val p = pages[cur]
+        editing = null; editOrig = null; hidden = emptySet()
+        when {
+            e.text.isBlank() -> { if (o != null) commit(p, p.items.filter { it !== o }); selected = null }
+            o == null -> { commit(p, p.items + e); selected = e; selFresh = false }
+            e !== o -> { commit(p, p.items.map { if (it === o) e else it }); selected = e; selFresh = false }
+            else -> { selected = o; selFresh = false }
+        }
+    }
+
+    fun goto(i: Int) { finishEdit(); cur = i; scrollY = 0f; selected = null }
 
     /** Applies a change to the selected shape (undoable), e.g. a new fill. */
     fun restyle(f: (Shape) -> Shape) {
@@ -275,18 +323,36 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         val n = f(s); val p = pages[cur]; val old = p.items
         commit(p, old.map { if (it === s) n else it }); selected = n
     }
+    /** Applies a style change to the box being typed in, or to the selected one (undoable). */
+    fun restyleText(f: (TextBox) -> TextBox) {
+        val e = editing
+        if (e != null) { editing = f(e); return }
+        val t = selected as? TextBox ?: return
+        if (selFresh) return
+        val n = f(t); val p = pages[cur]
+        commit(p, p.items.map { if (it === t) n else it }); selected = n
+    }
     fun pickColor(c: Int) {
         colors[tool] = c; store.prefs.edit().putInt("c$tool", c).apply()
         if (tool == SHAPE) restyle { it.copy(color = c) }
+        if (tool == TEXT) restyleText { it.copy(color = c) }
     }
+    fun setTextFont(f: Int) { tFont = f; store.prefs.edit().putInt("tfont", f).apply(); restyleText { it.copy(font = f) } }
+    fun toggleTextFlag(bit: Int) {
+        tFlags = tFlags xor bit; store.prefs.edit().putInt("tflags", tFlags).apply()
+        val on = tFlags and bit != 0
+        restyleText { it.copy(flags = if (on) it.flags or bit else it.flags and bit.inv()) }
+    }
+    fun setTextAlign(a: Int) { tAlign = a; store.prefs.edit().putInt("talign", a).apply(); restyleText { it.copy(align = a) } }
     fun setShapeKind(k: Int) { shapeKind = k; store.prefs.edit().putInt("shape", k).apply(); restyle { it.copy(kind = k) } }
     fun setShapeFill(c: Int) { shapeFill = c; store.prefs.edit().putInt("fill", c).apply(); restyle { it.copy(fill = c) } }
 
     LaunchedEffect(rev) { if (rev > 0) { delay(700); saveAll() } }
     val isNew = remember { note.created == note.modified } // never saved by an edit yet
     // Leaving a brand-new note that was not touched at all (rev stays 0) deletes it instead of leaving an empty note behind.
-    DisposableEffect(Unit) { onDispose { if (isNew && rev == 0) store.delete(note) else if (rev > 0) saveAll(); store.exporter.flushNow() } } // viewing alone never rewrites a note // ponytail: saves on the UI thread, move off it if notes grow huge
+    DisposableEffect(Unit) { onDispose { finishEdit(); if (isNew && rev == 0) store.delete(note) else if (rev > 0) saveAll(); store.exporter.flushNow() } } // viewing alone never rewrites a note // ponytail: saves on the UI thread, move off it if notes grow huge
     BackHandler(onBack = onBack)
+    BackHandler(enabled = editing != null) { finishEdit() } // back ends typing first
 
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { store.addImage(it) }?.let { (name, aspect) ->
@@ -325,20 +391,26 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         Btn("Back", onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
         if (!horizontal) kebab()
         Btn("Undo", {
+            finishEdit()
             val p = pages[cur]
             p.undo.removeLastOrNull()?.let { p.redo.addLast(p.items); p.items = it; selected = null; rev++ }
         }, enabled = canUndo) { Icon(Icons.AutoMirrored.Filled.Undo, null) }
         Btn("Redo", {
+            finishEdit()
             val p = pages[cur]
             p.redo.removeLastOrNull()?.let { p.undo.addLast(p.items); p.items = it; selected = null; rev++ }
         }, enabled = canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, null) }
         Spacer(Modifier.size(8.dp))
         TOOLS.forEachIndexed { i, t ->
             Box {
-                Btn(t.name, { if (tool != i) selected = null; tool = i }, selected = tool == i,
-                    longLabel = if (i == SHAPE) "Set shape, fill and outline" else "Set ${t.name.lowercase()} thickness",
-                    onLongClick = { if (tool != i) selected = null; tool = i; thicknessFor = i }) {
-                    if (i == SHAPE) ShapeGlyph(shapeKind) else Icon(painterResource(t.icon), null)
+                Btn(t.name, { finishEdit(); if (tool != i) selected = null; tool = i }, selected = tool == i,
+                    longLabel = when (i) { SHAPE -> "Set shape, fill and outline"; TEXT -> "Set font, size and style"; else -> "Set ${t.name.lowercase()} thickness" },
+                    onLongClick = { if (tool != i) { finishEdit(); selected = null }; tool = i; thicknessFor = i }) {
+                    when (i) {
+                        SHAPE -> ShapeGlyph(shapeKind)
+                        TEXT -> Icon(Icons.Default.TextFields, null)
+                        else -> Icon(painterResource(t.icon), null)
+                    }
                 }
                 DropdownMenu(thicknessFor == i, { thicknessFor = -1 }) {
                     if (i == SHAPE) Column(Modifier.width(368.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -361,6 +433,45 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                                 restyle { it.copy(width = widths[SHAPE]) }
                             },
                         )
+                    } else if (i == TEXT) Column(Modifier.width(368.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Text("Font", style = MaterialTheme.typography.titleSmall)
+                        Row {
+                            FONTS.forEachIndexed { idx, (_, label) ->
+                                Btn(label, { setTextFont(idx) }, selected = tFont == idx) {
+                                    Text("Aa", fontFamily = FontFamily(fontFace(idx, 0)), fontSize = 20.sp)
+                                }
+                            }
+                        }
+                        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Btn("Bold", { toggleTextFlag(1) }, selected = tFlags and 1 != 0, state = if (tFlags and 1 != 0) "On" else "Off") { Icon(Icons.Default.FormatBold, null) }
+                            Btn("Italic", { toggleTextFlag(2) }, selected = tFlags and 2 != 0, state = if (tFlags and 2 != 0) "On" else "Off") { Icon(Icons.Default.FormatItalic, null) }
+                            Btn("Underline", { toggleTextFlag(4) }, selected = tFlags and 4 != 0, state = if (tFlags and 4 != 0) "On" else "Off") { Icon(Icons.Default.FormatUnderlined, null) }
+                            Spacer(Modifier.width(12.dp))
+                            Btn("Align left", { setTextAlign(0) }, selected = tAlign == 0) { Icon(Icons.Default.FormatAlignLeft, null) }
+                            Btn("Align centre", { setTextAlign(1) }, selected = tAlign == 1) { Icon(Icons.Default.FormatAlignCenter, null) }
+                            Btn("Align right", { setTextAlign(2) }, selected = tAlign == 2) { Icon(Icons.Default.FormatAlignRight, null) }
+                        }
+                        Text("Size: ${widths[TEXT].roundToInt()}", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleSmall)
+                        Slider(
+                            widths[TEXT], { widths[TEXT] = it; editing?.let { e -> editing = e.copy(size = it) } },
+                            Modifier.semantics { contentDescription = "Text size" }, valueRange = t.min..t.max,
+                            onValueChangeFinished = {
+                                store.prefs.edit().putFloat("w$TEXT", widths[TEXT]).apply()
+                                if (editing == null) restyleText { it.copy(size = widths[TEXT]) }
+                            },
+                        )
+                        Text("The colour button sets the text colour.", style = MaterialTheme.typography.bodySmall)
+                        // true-size preview on white paper
+                        Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(90.dp).clip(RoundedCornerShape(8.dp)).background(Color.White)
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp)).padding(8.dp)) {
+                            Text(
+                                "Sample text", color = Color(colors[TEXT]), fontFamily = FontFamily(fontFace(tFont, tFlags)),
+                                fontSize = with(LocalDensity.current) { (widths[TEXT] * kPx).toSp() },
+                                textDecoration = if (tFlags and 4 != 0) TextDecoration.Underline else null,
+                                textAlign = when (tAlign) { 1 -> TextAlign.Center; 2 -> TextAlign.End; else -> TextAlign.Start },
+                                modifier = Modifier.fillMaxWidth(), maxLines = 2,
+                            )
+                        }
                     } else Column(Modifier.width(300.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Text("${t.name} thickness: ${"%.1f".format(widths[i])}", style = MaterialTheme.typography.titleSmall)
                         Slider(
@@ -462,8 +573,9 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     }
 
     val surface = @Composable {
+        Box(Modifier.fillMaxSize()) {
         Canvas(
-            Modifier.fillMaxSize().clipToBounds().onSizeChanged { kPx = it.width / PAGE_W }
+            Modifier.fillMaxSize().clipToBounds().onSizeChanged { kPx = it.width / PAGE_W; viewH = it.height }
                 .semantics { contentDescription = "Drawing area, page ${cur + 1} of ${pages.size}" }
                 .pointerInput(Unit) {
                     awaitEachGesture {
@@ -472,7 +584,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                         val touch = first.type == PointerType.Touch
                         var drawing = !touch || store.fingerDraw
 
-                        val shapeTool = tool == SHAPE
+                        val shapeTool = tool == SHAPE || tool == TEXT
                         // shape tool: 1 = move, 2 = resize through a handle, 3 = draw a new shape, 4 = rotate
                         var mode = 0
                         var orig: Item? = null
@@ -492,7 +604,8 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                                     1 -> moved(orig!!, x - x0, y - y0)
                                     2 -> resized(orig!!, handle, x, y)
                                     4 -> rotated(orig!!, x0, y0, x, y)
-                                    else -> Shape(shapeKind, colors[SHAPE], shapeFill, widths[SHAPE], x0, y0, x, y)
+                                    else -> if (tool == TEXT) newTextBox(minOf(x0, x), minOf(y0, y), maxOf(60f, abs(x - x0)))
+                                        else Shape(shapeKind, colors[SHAPE], shapeFill, widths[SHAPE], x0, y0, x, y)
                                 }
                             } else if (tool == ERASER) {
                                 val r = widths[ERASER]
@@ -504,8 +617,9 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                             }
                             tick++
                         }
-                        fun cancel() { live.clear(); erased = emptySet(); preview = null; if (hidden.isNotEmpty()) hidden = emptySet(); tick++ }
+                        fun cancel() { live.clear(); erased = emptySet(); preview = null; if (editing == null && hidden.isNotEmpty()) hidden = emptySet(); tick++ }
 
+                        if (editing != null) finishEdit() // touching the paper ends typing
                         if (drawing && shapeTool) {
                             x0 = first.position.x / k; y0 = first.position.y / k + scrollY
                             val sel = selected
@@ -537,13 +651,20 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                             val p = pages[cur]
                             if (shapeTool) {
                                 val pv = preview
-                                if (dragged && pv != null) {
+                                if (tool == TEXT && mode == 3) { // tap = a default-width box here, drag = a box of that width; either way start typing
+                                    if (dragged && pv is TextBox) startEdit(pv, false)
+                                    else if (!dragged) startEdit(newTextBox((x0).coerceAtMost(PAGE_W - 460f).coerceAtLeast(0f), y0 - widths[TEXT] / 2, 420f), false)
+                                } else if (dragged && pv != null) {
                                     val n = normalised(pv)
                                     val old = p.items
                                     commit(p, if (mode == 3) old + n else old.map { if (it === orig) n else it })
                                     selected = n
                                     if (mode == 3) selFresh = true
-                                } else if (!dragged && mode != 3) selFresh = false // tapping the selected shape again: now it is "chosen"
+                                } else if (!dragged && mode != 3) {
+                                    selFresh = false // tapping the selected shape again: now it is "chosen"
+                                    val o = orig
+                                    if (tool == TEXT && o is TextBox) startEdit(o, true) // tapping a text box with the text tool edits it
+                                }
                             } else if (tool == ERASER) { if (erased.isNotEmpty()) commit(p, p.items.filter { it !in erased }) }
                             else if (live.isNotEmpty()) {
                                 val stroke = Stroke(tool, colors[tool], widths[tool], live.toFloatArray())
@@ -576,7 +697,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                     n.restore()
                 }
                 val framed = pv ?: selected
-                if (tool == SHAPE && framed != null) {
+                if ((tool == SHAPE || tool == TEXT) && editing == null && framed != null) {
                     val dp = density
                     val hs = handles(framed, 44.dp.toPx() / k)
                     if (hs.isNotEmpty()) {
@@ -603,6 +724,39 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                     }
                 }
             }
+        }
+        editing?.let { e -> // the text box being typed in: a real text field laid over the paper, same font, size, colour and rotation
+            val d = LocalDensity.current
+            val focus = remember { FocusRequester() }
+            val keyboard = LocalSoftwareKeyboardController.current
+            var tf by remember { mutableStateOf(TextFieldValue(e.text, TextRange(e.text.length))) }
+            LaunchedEffect(Unit) { delay(120); runCatching { focus.requestFocus() }; keyboard?.show() }
+            // keep the box above the keyboard while typing
+            LaunchedEffect(viewH, e.h, e.y) {
+                if (viewH > 0) {
+                    val bottom = (e.y + e.h - scrollY) * kPx
+                    val room = viewH - 24 * d.density
+                    if (bottom > room) scrollY += (bottom - room) / kPx
+                    if (e.y - scrollY < 0f) scrollY = e.y
+                }
+            }
+            BasicTextField(
+                tf, { tf = it; if (it.text != editing?.text) editing = editing?.copy(text = it.text) },
+                Modifier.offset { IntOffset((e.x * kPx).roundToInt(), ((e.y - scrollY) * kPx).roundToInt()) }
+                    .width(with(d) { (e.w * kPx).toDp() })
+                    .graphicsLayer { rotationZ = Math.toDegrees(e.rot.toDouble()).toFloat() }
+                    .border(1.5.dp, Color(SEL))
+                    .focusRequester(focus)
+                    .semantics { contentDescription = "Text box" },
+                textStyle = TextStyle(
+                    fontFamily = FontFamily(fontFace(e.font, e.flags)), fontSize = with(d) { (e.size * kPx).toSp() }, color = Color(e.color),
+                    textAlign = when (e.align) { 1 -> TextAlign.Center; 2 -> TextAlign.End; else -> TextAlign.Start },
+                    textDecoration = if (e.flags and 4 != 0) TextDecoration.Underline else null,
+                ),
+                cursorBrush = SolidColor(Color(e.color)),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences), // capital first letter, like every other name box
+            )
+        }
         }
     }
 

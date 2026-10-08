@@ -166,6 +166,14 @@ fun drawShape(c: Canvas, s: Shape, dim: Boolean = false) {
     if (turned) c.restore()
 }
 
+fun drawTextBox(c: Canvas, t: TextBox) {
+    c.save()
+    if (t.rot != 0f) c.rotate(deg(t.rot), t.x + t.w / 2, t.y + t.h / 2)
+    c.translate(t.x, t.y)
+    t.layout.draw(c)
+    c.restore()
+}
+
 private fun drawImg(c: Canvas, bm: Bitmap, im: Img, alpha: Int = 255) {
     p.alpha = alpha
     if (im.rot != 0f) { c.save(); c.rotate(deg(im.rot), im.x + im.w / 2, im.y + im.h / 2) }
@@ -180,6 +188,7 @@ fun drawItem(c: Canvas, item: Item, bitmap: (String) -> Bitmap?) {
         is Stroke -> drawStroke(c, item)
         is Shape -> drawShape(c, item)
         is Img -> bitmap(item.file)?.let { drawImg(c, it, item) }
+        is TextBox -> drawTextBox(c, item)
     }
 }
 
@@ -189,6 +198,7 @@ fun drawItem(c: Canvas, item: Item, bitmap: (String) -> Bitmap?) {
 fun frameOf(item: Item): FloatArray? = when {
     item is Shape && !item.isLine -> floatArrayOf(item.left, item.top, item.right, item.bottom, item.rot)
     item is Img -> floatArrayOf(item.x, item.y, item.x + item.w, item.y + item.h, item.rot)
+    item is TextBox -> floatArrayOf(item.x, item.y, item.x + item.w, item.y + item.h, item.rot)
     else -> null
 }
 
@@ -222,6 +232,7 @@ fun insideBox(item: Item, x: Float, y: Float): Boolean {
 fun moved(item: Item, dx: Float, dy: Float): Item = when (item) {
     is Shape -> item.copy(x1 = item.x1 + dx, y1 = item.y1 + dy, x2 = item.x2 + dx, y2 = item.y2 + dy)
     is Img -> Img(item.file, item.x + dx, item.y + dy, item.w, item.h, item.rot)
+    is TextBox -> item.copy(x = item.x + dx, y = item.y + dy)
     else -> item
 }
 
@@ -236,6 +247,14 @@ fun resized(item: Item, h: Int, x: Float, y: Float): Item {
     val o = rotPt(if (h == 0 || h == 2) f[2] else f[0], if (h == 0 || h == 1) f[3] else f[1], cx, cy, a) // fixed corner, on the page
     val v = rotPt(x, y, o.first, o.second, -a) // cursor in the item's own (unrotated) frame, relative to the fixed corner
     var vx = v.first - o.first; var vy = v.second - o.second
+    if (item is TextBox) {
+        val nw = maxOf(60f, abs(vx))
+        val nh = item.copy(w = nw).h
+        val sx = if (h == 0 || h == 2) -1f else 1f; val sy = if (h == 0 || h == 1) -1f else 1f
+        val corner = rotPt(o.first + sx * nw, o.second + sy * nh, o.first, o.second, a)
+        val ncx = (o.first + corner.first) / 2; val ncy = (o.second + corner.second) / 2
+        return item.copy(x = ncx - nw / 2, y = ncy - nh / 2, w = nw)
+    }
     if (item is Img) {
         val w = maxOf(30f, abs(vx))
         vx = (if (h == 0 || h == 2) -1f else 1f) * w; vy = (if (h == 0 || h == 1) -1f else 1f) * w * item.h / item.w
@@ -261,6 +280,7 @@ fun rotated(item: Item, x0: Float, y0: Float, x: Float, y: Float): Item {
     return when (item) {
         is Shape -> item.copy(rot = a)
         is Img -> Img(item.file, item.x, item.y, item.w, item.h, a)
+        is TextBox -> item.copy(rot = a)
         else -> item
     }
 }
@@ -312,7 +332,7 @@ fun shapeHit(s: Shape, px: Float, py: Float, tol: Float): Boolean {
 /** Topmost shape or image under the point, if any. */
 fun hitItem(items: List<Item>, x: Float, y: Float, tol: Float): Item? = items.asReversed().firstOrNull {
     when (it) {
-        is Img -> insideBox(it, x, y)
+        is Img, is TextBox -> insideBox(it, x, y)
         is Shape -> shapeHit(it, x, y, tol)
         else -> false
     }
@@ -334,6 +354,7 @@ fun drawPage(
             is Stroke -> if (it.maxY >= scrollY && it.minY <= scrollY + viewH) drawStroke(c, it, it in dimmed)
             is Shape -> if (it.maxY >= scrollY && it.minY <= scrollY + viewH) drawShape(c, it, it in dimmed)
             is Img -> bitmap(it.file)?.let { b -> drawImg(c, b, it, if (it in dimmed) 64 else 255) }
+            is TextBox -> if (it.maxY >= scrollY && it.minY <= scrollY + viewH) drawTextBox(c, it)
         }
     }
     c.restore()
@@ -357,6 +378,9 @@ fun hits(item: Item, x: Float, y: Float, r: Float): Boolean = when (item) {
         q.first >= item.x - r && q.first <= item.x + item.w + r && q.second >= item.y - r && q.second <= item.y + item.h + r
     }
     is Shape -> shapeHit(item, x, y, r)
+    is TextBox -> rotPt(x, y, item.x + item.w / 2, item.y + item.h / 2, -item.rot).let { q ->
+        q.first >= item.x - r && q.first <= item.x + item.w + r && q.second >= item.y - r && q.second <= item.y + item.h + r
+    }
     is Stroke -> {
         val rr = r + item.width / 2
         y in item.minY - r..item.maxY + r && (0 until item.n).any { i ->

@@ -87,6 +87,42 @@ class Shape(
     ) = Shape(kind, color, fill, width, x1, y1, x2, y2, rot)
 }
 
+/** Font families a text box can use: Android family name and the label shown to the user. */
+val FONTS = listOf("sans-serif" to "Sans", "serif" to "Serif", "monospace" to "Monospace", "cursive" to "Handwriting", "casual" to "Casual")
+
+fun fontFace(font: Int, flags: Int): android.graphics.Typeface = android.graphics.Typeface.create(
+    FONTS[font.coerceIn(0, FONTS.lastIndex)].first,
+    when (flags and 3) { 1 -> android.graphics.Typeface.BOLD; 2 -> android.graphics.Typeface.ITALIC; 3 -> android.graphics.Typeface.BOLD_ITALIC; else -> android.graphics.Typeface.NORMAL },
+)
+
+/**
+ * A text box on the page. [flags]: 1 bold, 2 italic, 4 underline. [align]: 0 left, 1 centre, 2 right. [size] (font size) and
+ * [w] (box width, the text wraps inside it) are in page units; the height follows from the text. [rot] is in radians, clockwise,
+ * around the box centre. Immutable, like the other items.
+ */
+class TextBox(
+    val text: String, val color: Int, val size: Float, val flags: Int, val font: Int, val align: Int,
+    val x: Float, val y: Float, val w: Float, val rot: Float = 0f,
+) : Item() {
+    val layout: android.text.StaticLayout by lazy {
+        val face = fontFace(font, flags); val underline = flags and 4 != 0; val argb = color; val px = size // read here: inside apply{} "flags" and "color" would be the Paint's own
+        val paint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = px; color = argb; typeface = face; isUnderlineText = underline
+        }
+        android.text.StaticLayout.Builder.obtain(text, 0, text.length, paint, w.toInt().coerceAtLeast(1))
+            .setAlignment(when (align) { 1 -> android.text.Layout.Alignment.ALIGN_CENTER; 2 -> android.text.Layout.Alignment.ALIGN_OPPOSITE; else -> android.text.Layout.Alignment.ALIGN_NORMAL })
+            .setIncludePad(false).build()
+    }
+    val h get() = layout.height.toFloat().coerceAtLeast(size)
+    private val reach get() = if (rot == 0f) h / 2 else kotlin.math.hypot(w, h) / 2
+    override val minY get() = y + h / 2 - reach
+    override val maxY get() = y + h / 2 + reach
+    fun copy(
+        text: String = this.text, color: Int = this.color, size: Float = this.size, flags: Int = this.flags, font: Int = this.font,
+        align: Int = this.align, x: Float = this.x, y: Float = this.y, w: Float = this.w, rot: Float = this.rot,
+    ) = TextBox(text, color, size, flags, font, align, x, y, w, rot)
+}
+
 /** kind: "text" or "ink". bg: id from [BACKGROUNDS]. */
 data class Note(
     val id: String, val title: String, val kind: String, val bg: String,
@@ -279,6 +315,8 @@ class Store(private val ctx: Context) {
                             }
                             1 -> Img(i.readUTF(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
                             4 -> Img(i.readUTF(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                            5 -> TextBox(String(ByteArray(i.readInt()).also { b -> i.readFully(b) }, Charsets.UTF_8), i.readInt(), i.readFloat(),
+                                i.readByte().toInt(), i.readByte().toInt(), i.readByte().toInt(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
                             2 -> Shape(i.readByte().toInt(), i.readInt(), i.readInt(), i.readFloat(),
                                 i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
                             else -> Shape(i.readByte().toInt(), i.readInt(), i.readInt(), i.readFloat(),
@@ -309,6 +347,12 @@ class Store(private val ctx: Context) {
                     is Img -> {
                         o.writeByte(4); o.writeUTF(item.file)
                         o.writeFloat(item.x); o.writeFloat(item.y); o.writeFloat(item.w); o.writeFloat(item.h); o.writeFloat(item.rot)
+                    }
+                    is TextBox -> {
+                        val b = item.text.toByteArray(Charsets.UTF_8)
+                        o.writeByte(5); o.writeInt(b.size); o.write(b); o.writeInt(item.color); o.writeFloat(item.size)
+                        o.writeByte(item.flags); o.writeByte(item.font); o.writeByte(item.align)
+                        o.writeFloat(item.x); o.writeFloat(item.y); o.writeFloat(item.w); o.writeFloat(item.rot)
                     }
                     is Shape -> {
                         o.writeByte(3); o.writeByte(item.kind); o.writeInt(item.color); o.writeInt(item.fill); o.writeFloat(item.width)
