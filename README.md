@@ -21,6 +21,7 @@ Séyès, Séyès with margin.
 **Editor**
 - Pages are as wide as the screen and infinitely tall; scroll with two fingers (or one, when finger drawing is off); several pages per note
 - Tools: pen, highlighter (half transparent), calligraphic pen (flat 45° nib), object eraser (removes whole strokes), a **shape** tool and a **text box** tool
+- **Double-tap the eraser** to use it just once: it shows a "1" badge, and after the first erase that removes something the toolbox goes back to the tool you had before. Double-tap again to cancel; a single tap still selects the eraser as usual
 - Tap selects a tool, **tap-and-hold** opens a settings popup (thickness slider with a true-size preview; for shapes also the shape, fill and border; for text the font, style and size)
 - **Shapes**: rectangle (default), ellipse, triangle, line, arrow, 5-point star and a spiky "price label" burst. Each has a fill and a border
   (both can be "none"), colours from the palette or your custom colour, and a border thickness
