@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="20.184288mm"
+   height="16.436613mm"
+   viewBox="0 0 20.184288 16.436613"
+   version="1.1"
+   id="svg1"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     showgrid="true"
+     inkscape:zoom="4.8742899"
+     inkscape:cx="118.37622"
+     inkscape:cy="51.392101"
+     inkscape:window-width="1920"
+     inkscape:window-height="1009"
+     inkscape:window-x="2552"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1">
+    <inkscape:grid
+       id="grid1"
+       units="mm"
+       originx="-9.6038294"
+       originy="-4.3967943"
+       spacingx="0.99999998"
+       spacingy="1"
+       empcolor="#0099e5"
+       empopacity="0.30196078"
+       color="#0099e5"
+       opacity="0.14901961"
+       empspacing="5"
+       enabled="true"
+       visible="true" />
+    <inkscape:page
+       x="0"
+       y="0"
+       width="20.184288"
+       height="16.436613"
+       id="page2"
+       margin="0"
+       bleed="0" />
+  </sodipodi:namedview>
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(-9.6038292,-4.3967943)">
+    <text
+       xml:space="preserve"
+       style="font-size:19.7556px;font-family:Coiny;-inkscape-font-specification:'Coiny, Normal';writing-mode:lr-tb;direction:ltr;opacity:1;fill:#ffeeaa;stroke-width:1"
+       x="8.596282"
+       y="20.675375"
+       id="text1"
+       inkscape:export-filename="text1.svg"
+       inkscape:export-xdpi="96"
+       inkscape:export-ydpi="96"><tspan
+         sodipodi:role="line"
+         id="tspan1"
+         style="fill:#000000;stroke-width:1"
+         x="8.596282"
+         y="20.675375">J</tspan></text>
+    <circle
+       style="opacity:1;fill:#ffcc00;stroke:none;stroke-width:1;stroke-opacity:1"
+       id="path1"
+       cx="26.272202"
+       cy="7.0023022"
+       r="2.6055079" />
+    <circle
+       style="fill:#0000ff;stroke:none;stroke-width:0.75;stroke-opacity:1"
+       id="path1-1"
+       cx="27.833988"
+       cy="13.11409"
+       r="1.9541309" />
+    <circle
+       style="fill:#d40000;stroke:none;stroke-width:0.5625;stroke-opacity:1"
+       id="path1-8"
+       cx="22.650265"
+       cy="12.116861"
+       r="1.4655982" />
+  </g>
+</svg>

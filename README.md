@@ -25,7 +25,7 @@ Séyès, Séyès with margin.
 - **Shapes**: rectangle (default), ellipse, triangle, line, arrow, 5-point star and a spiky "price label" burst. Each has a fill and a border
   (both can be "none"), colours from the palette or your custom colour, and a border thickness
 - **Text boxes**: tap the paper (or drag out a box of the width you want) and type with the keyboard; the text wraps inside the box and the first letter of a sentence is capitalised.
-  Five fonts (sans, serif, monospace, handwriting, casual), bold, italic, underline, left/centre/right alignment, size and colour. Tap a box with the text tool to edit it again;
+  Five fonts (Open Sans, serif, monospace, handwriting, Gochi Hand), bold, italic, underline, left/centre/right alignment, size and colour. Tap a box with the text tool to edit it again;
   an empty box is discarded. Style changes apply to the box you are typing in or have selected, and are remembered for the next one
 - **Shapes, text boxes and images can be selected, moved, resized and rotated** with the shape tool (the text tool does the same for text boxes): drag inside to move, drag a corner to resize,
   drag the extra blue handle outside the bottom-right corner to rotate (snaps to 15°). Lines and arrows are reshaped by their end points
@@ -86,10 +86,18 @@ app/src/main/java/com/follet/jotter/
   Screens.kt     start page (drawer, folders, search, stars), paper picker, settings, sharing
   Theme.kt       light/dark colour schemes
   MainActivity.kt
+app/src/main/assets/fonts/   bundled Open Sans and Gochi Hand (plus their licences)
+app/src/main/res/drawable/ic_launcher_*.xml   the adaptive app icon, drawn from docs/app-icon.svg
+docs/app-icon.svg            source artwork of the app icon
 ```
 
 Notes live in app-private storage: a small JSON file for metadata, a compact binary file for the strokes, shapes and image placements, and a PNG
 thumbnail per note; text boxes are stored as UTF-8 text with their style; folders are a small JSON list. There is no database, and the only dependencies are Compose, Material 3, Activity and DocumentFile.
+
+## Fonts
+
+Open Sans and Gochi Hand are bundled in `app/src/main/assets/fonts/` (both under the SIL Open Font License, see the `OFL-*.txt` files next to them);
+the serif, monospace and handwriting fonts are the system ones, so those look a little different from one device to the next.
 
 ## Known limits
 
