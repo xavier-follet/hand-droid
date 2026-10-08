@@ -173,7 +173,7 @@ private fun ShapeGlyph(kind: Int) {
 @Composable
 private fun Btn(
     label: String, onClick: () -> Unit, selected: Boolean = false, enabled: Boolean = true, state: String? = null,
-    longLabel: String? = null, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit,
+    longLabel: String? = null, onLongClick: (() -> Unit)? = null, onDoubleClick: (() -> Unit)? = null, content: @Composable () -> Unit,
 ) {
     val shape = RoundedCornerShape(10.dp)
     val c = MaterialTheme.colorScheme
@@ -181,7 +181,7 @@ private fun Btn(
         Modifier.size(48.dp).padding(2.dp).alpha(if (enabled) 1f else 0.38f).clip(shape)
             .then(if (selected) Modifier.background(c.primaryContainer).border(2.dp, c.primary, shape) else Modifier)
             .combinedClickable(
-                enabled = enabled, role = Role.Button, onLongClickLabel = longLabel, onLongClick = onLongClick, onClick = onClick,
+                enabled = enabled, role = Role.Button, onLongClickLabel = longLabel, onLongClick = onLongClick, onDoubleClick = onDoubleClick, onClick = onClick,
             )
             .semantics { contentDescription = label; this.selected = selected; if (state != null) stateDescription = state },
         Alignment.Center,
@@ -253,6 +253,9 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     var cur by remember { mutableIntStateOf(0) }
     var scrollY by remember { mutableFloatStateOf(0f) }
     var tool by remember { mutableIntStateOf(0) }
+    // Double-tapping the eraser arms it for a single use: after one erase it hands back to the tool that was active before.
+    var lastTool by remember { mutableIntStateOf(0) } // the most recent tool other than the eraser
+    var oneShot by remember { mutableStateOf(false) }
     // Tool thickness, colours, pressure and finger drawing are remembered across notes (SharedPreferences).
     val widths = remember { mutableStateListOf<Float>().apply { TOOLS.forEachIndexed { i, t -> add(store.prefs.getFloat("w$i", t.def)) } } }
     val colors = remember { mutableStateListOf<Int>().apply { DEFAULT_COLORS.forEachIndexed { i, d -> add(store.prefs.getInt("c$i", d)) } } }
@@ -358,7 +361,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         uri?.let { store.addImage(it) }?.let { (name, aspect) ->
             val img = Img(name, 80f, scrollY + 80f, 400f, 400f * aspect)
             commit(pages[cur], pages[cur].items + img)
-            tool = SHAPE; selected = img // the shape tool moves and resizes images, so hand it over right away
+            oneShot = false; lastTool = SHAPE; tool = SHAPE; selected = img // the shape tool moves and resizes images, so hand it over right away
         }
     }
 
@@ -403,12 +406,29 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         Spacer(Modifier.size(8.dp))
         TOOLS.forEachIndexed { i, t ->
             Box {
-                Btn(t.name, { finishEdit(); if (tool != i) selected = null; tool = i }, selected = tool == i,
+                Btn(t.name, { finishEdit(); if (tool != i) selected = null; oneShot = false; if (i != ERASER) lastTool = i; tool = i }, selected = tool == i,
+                    state = if (i == ERASER && oneShot && tool == ERASER) "One use" else null,
+                    onDoubleClick = if (i != ERASER) null else {
+                        {
+                            finishEdit()
+                            if (oneShot && tool == ERASER) { oneShot = false; tool = lastTool } // double-tap again: cancel
+                            else { if (tool != ERASER) lastTool = tool; selected = null; oneShot = true; tool = ERASER }
+                        }
+                    },
                     longLabel = when (i) { SHAPE -> "Set shape, fill and outline"; TEXT -> "Set font, size and style"; else -> "Set ${t.name.lowercase()} thickness" },
-                    onLongClick = { if (tool != i) { finishEdit(); selected = null }; tool = i; thicknessFor = i }) {
+                    onLongClick = { if (tool != i) { finishEdit(); selected = null }; oneShot = false; if (i != ERASER) lastTool = i; tool = i; thicknessFor = i }) {
                     when (i) {
                         SHAPE -> ShapeGlyph(shapeKind)
                         TEXT -> Icon(Icons.Default.TextFields, null)
+                        ERASER -> Box {
+                            Icon(painterResource(t.icon), null)
+                            if (oneShot && tool == ERASER) { // a small "1" badge: the eraser is armed for one use
+                                Box(Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = (-7).dp).size(19.dp)
+                                    .background(MaterialTheme.colorScheme.onPrimaryContainer, CircleShape), Alignment.Center) {
+                                    Text("1", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = MaterialTheme.colorScheme.primaryContainer)
+                                }
+                            }
+                        }
                         else -> Icon(painterResource(t.icon), null)
                     }
                 }
@@ -665,7 +685,12 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                                     val o = orig
                                     if (tool == TEXT && o is TextBox) startEdit(o, true) // tapping a text box with the text tool edits it
                                 }
-                            } else if (tool == ERASER) { if (erased.isNotEmpty()) commit(p, p.items.filter { it !in erased }) }
+                            } else if (tool == ERASER) {
+                                if (erased.isNotEmpty()) {
+                                    commit(p, p.items.filter { it !in erased })
+                                    if (oneShot) { oneShot = false; tool = lastTool } // used once: back to the previous tool
+                                }
+                            }
                             else if (live.isNotEmpty()) {
                                 val stroke = Stroke(tool, colors[tool], widths[tool], live.toFloatArray())
                                 val old = p.items
