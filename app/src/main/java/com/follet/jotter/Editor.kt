@@ -11,7 +11,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -49,6 +52,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.graphics.toArgb
@@ -59,6 +63,7 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.res.painterResource
@@ -82,42 +87,55 @@ private class PageState(items: List<Item>) {
 }
 
 /**
- * Committed page content (paper + strokes) rendered once into a bitmap covering two viewport heights, so each frame only
- * blits it and draws the stroke in progress. Cost per frame no longer grows with what is already written.
+ * Committed page content (paper + strokes) rendered once into a bitmap that covers more than the screen, so each frame only blits it
+ * (scaled and shifted) and draws the stroke in progress. Cost per frame no longer grows with what is already written. The bitmap
+ * remembers which part of the page it shows and at which scale; while pinching it is simply stretched, and re-rendered sharp afterwards.
  */
 private class PageCache {
     private var bmp: Bitmap? = null
     private var cv: android.graphics.Canvas? = null
-    private var top = 0f // page-y (units) of the bitmap's first row
-    private var k = 0f
+    var left = 0f; private set  // page position (units) of the bitmap's first column
+    var top = 0f; private set   // ... and first row
+    var scale = 1f; private set // bitmap pixels per page unit when it was rendered
     private var items: List<Item>? = null
     private var erased: Set<Item> = emptySet()
     private var hidden: Set<Item> = emptySet()
     private var page = -1
 
-    fun update(w: Int, h: Int, k: Float, items: List<Item>, erased: Set<Item>, hidden: Set<Item>, page: Int, scrollY: Float, bg: String, bitmap: (String) -> Bitmap?): Pair<Bitmap, Float> {
-        val viewH = h / k
+    /** [ke] = screen pixels per page unit now; [panX]/[scrollY] = page position of the screen's top-left corner. */
+    fun update(
+        w: Int, h: Int, ke: Float, zoomed: Boolean, items: List<Item>, erased: Set<Item>, hidden: Set<Item>, page: Int,
+        panX: Float, scrollY: Float, bg: String, pinching: Boolean, bitmap: (String) -> Bitmap?,
+    ): Bitmap {
+        val bw = if (zoomed) 2 * w else w // zoomed in: room to pan sideways without re-rendering
         var b = bmp
         var dirty = false
-        if (b == null || b.width != w || b.height != 2 * h) {
-            b = Bitmap.createBitmap(w, 2 * h, Bitmap.Config.ARGB_8888); bmp = b; cv = android.graphics.Canvas(b); dirty = true
+        if (b == null || b.width != bw || b.height != 2 * h) {
+            b = Bitmap.createBitmap(bw, 2 * h, Bitmap.Config.ARGB_8888); bmp = b; cv = android.graphics.Canvas(b); dirty = true
         }
-        if (dirty || this.items !== items || this.erased !== erased || this.hidden !== hidden || this.page != page || this.k != k ||
-            scrollY < top || scrollY + viewH > top + 2 * viewH) {
-            top = (scrollY - viewH / 2).coerceAtLeast(0f)
-            cv!!.save(); cv!!.scale(k, k)
-            drawPage(cv!!, items, bg, top, 2 * viewH, bitmap, erased, hidden)
-            cv!!.restore()
-            this.items = items; this.erased = erased; this.hidden = hidden; this.page = page; this.k = k
+        val vw = w / ke; val vh = h / ke
+        val coveredW = b.width / scale; val coveredH = b.height / scale
+        val outside = panX < left || scrollY < top || panX + vw > left + coveredW || scrollY + vh > top + coveredH
+        val blurry = !pinching && kotlin.math.abs(ke / scale - 1f) > 0.02f
+        if (dirty || outside || blurry || this.items !== items || this.erased !== erased || this.hidden !== hidden || this.page != page) {
+            scale = ke
+            left = if (zoomed) (panX - vw / 2).coerceAtLeast(0f) else 0f
+            top = (scrollY - vh / 2).coerceAtLeast(0f)
+            val c = cv!!
+            c.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+            c.save(); c.scale(scale, scale); c.translate(-left, 0f)
+            drawPage(c, items, bg, top, b.height / scale, bitmap, erased, hidden)
+            c.restore()
+            this.items = items; this.erased = erased; this.hidden = hidden; this.page = page
         }
-        return b to top
+        return b
     }
 
     /** A new stroke was committed on the page [old] -> [new]: paint just that stroke instead of re-rendering everything. */
     fun append(old: List<Item>, new: List<Item>, s: Stroke) {
         val c = cv ?: return
         if (items !== old || erased.isNotEmpty() || hidden.isNotEmpty()) return
-        c.save(); c.scale(k, k); c.translate(0f, -top); drawStroke(c, s); c.restore()
+        c.save(); c.scale(scale, scale); c.translate(-left, -top); drawStroke(c, s); c.restore()
         items = new
     }
 }
@@ -252,6 +270,10 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     }
     var cur by remember { mutableIntStateOf(0) }
     var scrollY by remember { mutableFloatStateOf(0f) }
+    var zoom by remember { mutableFloatStateOf(1f) } // 1 = the page fills the width; pinch to zoom in up to 5x (handwriting editor only)
+    var panX by remember { mutableFloatStateOf(0f) } // page position (units) at the left edge of the screen; scrollY is the top edge
+    var viewW by remember { mutableIntStateOf(0) }
+    var pinching by remember { mutableStateOf(false) } // while true the cached page is stretched instead of re-rendered
     var tool by remember { mutableIntStateOf(0) }
     // Double-tapping the eraser arms it for a single use: after one erase it hands back to the tool that was active before.
     var lastTool by remember { mutableIntStateOf(0) } // the most recent tool other than the eraser
@@ -268,6 +290,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     var preview by remember { mutableStateOf<Item?>(null) }    // the new/moved/resized item while dragging
     var hidden by remember { mutableStateOf<Set<Item>>(emptySet()) } // original of the item being dragged
     val selPaint = remember { android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG) }
+    val bmpPaint = remember { android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG) } // smooth stretching while pinching
     var colorMenu by remember { mutableStateOf(false) }
     var customDialog by remember { mutableStateOf(false) }
     var customFor by remember { mutableIntStateOf(0) } // 0 = tool colour, 1 = shape fill, 2 = shape border
@@ -275,7 +298,13 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     var custom by remember { mutableStateOf(store.prefs.getString("custom", "")!!.split(",").firstNotNullOfOrNull { it.toIntOrNull() }) }
     var renaming by remember { mutableStateOf(false) }
     var rev by remember { mutableIntStateOf(0) }
-    var kPx by remember { mutableFloatStateOf(1f) } // screen px per page unit, so the slider preview shows true size
+    var kPx by remember { mutableFloatStateOf(1f) } // screen px per page unit at zoom 1 (page width = view width)
+    fun ke() = kPx * zoom // screen px per page unit right now; previews use it too, so they show the true on-screen size
+    fun clampPan() {
+        val k = ke()
+        if (k > 0f && viewW > 0) panX = panX.coerceIn(0f, maxOf(0f, PAGE_W - viewW / k))
+    }
+    LaunchedEffect(kPx, viewW) { clampPan() } // rotating the tablet changes the view width
     val live = remember { ArrayList<Float>() }
     val cache = remember { PageCache() }
     var tick by remember { mutableIntStateOf(0) }
@@ -317,7 +346,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
         }
     }
 
-    fun goto(i: Int) { finishEdit(); cur = i; scrollY = 0f; selected = null }
+    fun goto(i: Int) { finishEdit(); cur = i; scrollY = 0f; panX = 0f; selected = null }
 
     /** Applies a change to the selected shape (undoable), e.g. a new fill. */
     fun restyle(f: (Shape) -> Shape) {
@@ -359,7 +388,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
 
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { store.addImage(it) }?.let { (name, aspect) ->
-            val img = Img(name, 80f, scrollY + 80f, 400f, 400f * aspect)
+            val img = Img(name, panX + 80f, scrollY + 80f, 400f, 400f * aspect)
             commit(pages[cur], pages[cur].items + img)
             oneShot = false; lastTool = SHAPE; tool = SHAPE; selected = img // the shape tool moves and resizes images, so hand it over right away
         }
@@ -486,7 +515,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp)).padding(8.dp)) {
                             Text(
                                 "Sample text", color = Color(colors[TEXT]), fontFamily = FontFamily(fontFace(tFont, tFlags)),
-                                fontSize = with(LocalDensity.current) { (widths[TEXT] * kPx).toSp() },
+                                fontSize = with(LocalDensity.current) { (widths[TEXT] * ke()).toSp() },
                                 textDecoration = if (tFlags and 4 != 0) TextDecoration.Underline else null,
                                 textAlign = when (tAlign) { 1 -> TextAlign.Center; 2 -> TextAlign.End; else -> TextAlign.Start },
                                 modifier = Modifier.fillMaxWidth(), maxLines = 2,
@@ -502,7 +531,7 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                         // true-size preview on white paper
                         Canvas(Modifier.fillMaxWidth().height(110.dp).clip(RoundedCornerShape(8.dp)).background(Color.White)
                             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))) {
-                            val k = kPx
+                            val k = ke()
                             val w = size.width / k; val h = size.height / k
                             drawIntoCanvas { cv ->
                                 val n = cv.nativeCanvas
@@ -595,11 +624,10 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
     val surface = @Composable {
         Box(Modifier.fillMaxSize()) {
         Canvas(
-            Modifier.fillMaxSize().clipToBounds().onSizeChanged { kPx = it.width / PAGE_W; viewH = it.height }
+            Modifier.fillMaxSize().clipToBounds().onSizeChanged { kPx = it.width / PAGE_W; viewH = it.height; viewW = it.width }
                 .semantics { contentDescription = "Drawing area, page ${cur + 1} of ${pages.size}" }
                 .pointerInput(Unit) {
                     awaitEachGesture {
-                        val k = size.width / PAGE_W
                         val first = awaitFirstDown(requireUnconsumed = false)
                         val touch = first.type == PointerType.Touch
                         var drawing = !touch || store.fingerDraw
@@ -611,10 +639,10 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                         var handle = -1
                         var x0 = 0f; var y0 = 0f
                         var dragged = false
-                        val slop = 8.dp.toPx() / k
+                        val slop = 8.dp.toPx() / ke()
 
                         fun add(ch: PointerInputChange, pos: Offset) {
-                            val x = pos.x / k; val y = pos.y / k + scrollY
+                            val x = pos.x / ke() + panX; val y = pos.y / ke() + scrollY
                             if (shapeTool) {
                                 if (!dragged && hypot(x - x0, y - y0) > slop) {
                                     dragged = true
@@ -641,13 +669,13 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
 
                         if (editing != null) finishEdit() // touching the paper ends typing
                         if (drawing && shapeTool) {
-                            x0 = first.position.x / k; y0 = first.position.y / k + scrollY
+                            x0 = first.position.x / ke() + panX; y0 = first.position.y / ke() + scrollY
                             val sel = selected
-                            val grabbed = if (sel != null) handleAt(sel, x0, y0, 24.dp.toPx() / k, 44.dp.toPx() / k) else -1
+                            val grabbed = if (sel != null) handleAt(sel, x0, y0, 24.dp.toPx() / ke(), 44.dp.toPx() / ke()) else -1
                             if (sel != null && grabbed >= 0) { mode = if (grabbed == 4) 4 else 2; orig = sel; handle = grabbed } // 4 = rotate handle
                             else if (sel != null && insideBox(sel, x0, y0)) { mode = 1; orig = sel } // drag anywhere inside the frame to move
                             else {
-                                val hit = hitItem(pages[cur].items, x0, y0, 12.dp.toPx() / k)
+                                val hit = hitItem(pages[cur].items, x0, y0, 12.dp.toPx() / ke())
                                 if (hit != null) { mode = 1; orig = hit; selected = hit; selFresh = false } else { mode = 3; selected = null }
                             }
                             tick++
@@ -663,17 +691,30 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                                 ch.historical.forEach { add(ch, it.position) }
                                 add(ch, ch.position)
                             } else {
-                                scrollY = (scrollY - ev.calculatePan().y / k).coerceAtLeast(0f)
+                                // pinch to zoom, drag to pan: the page point that was under the fingers stays under them
+                                val pan = ev.calculatePan(); val zf = ev.calculateZoom(); val c = ev.calculateCentroid(useCurrent = true)
+                                if (ev.changes.count { it.pressed } > 1 && !pinching) pinching = true
+                                val oldKe = ke()
+                                val newZoom = (zoom * zf).coerceIn(1f, 5f)
+                                val newKe = kPx * newZoom
+                                val px = (c.x - pan.x) / oldKe + panX; val py = (c.y - pan.y) / oldKe + scrollY // page point held by the fingers
+                                zoom = newZoom
+                                panX = (px - c.x / newKe).coerceIn(0f, maxOf(0f, PAGE_W - size.width / newKe))
+                                scrollY = (py - c.y / newKe).coerceAtLeast(0f)
                             }
                             ev.changes.forEach { it.consume() }
                         }
+                        if (pinching) { pinching = false; tick++ } // fingers up: re-render the page sharp at the new zoom
                         if (drawing) {
                             val p = pages[cur]
                             if (shapeTool) {
                                 val pv = preview
                                 if (tool == TEXT && mode == 3) { // tap = a default-width box here, drag = a box of that width; either way start typing
                                     if (dragged && pv is TextBox) startEdit(pv, false)
-                                    else if (!dragged) startEdit(newTextBox((x0).coerceAtMost(PAGE_W - 460f).coerceAtLeast(0f), y0 - widths[TEXT] / 2, 420f), false)
+                                    else if (!dragged) {
+                                        val bw = minOf(420f, size.width / ke() * 0.8f) // a new box fits the screen, also when zoomed in
+                                        startEdit(newTextBox(x0.coerceIn(0f, maxOf(0f, PAGE_W - bw)), y0 - widths[TEXT] / 2, bw), false)
+                                    }
                                 } else if (dragged && pv != null) {
                                     val n = normalised(pv)
                                     val old = p.items
@@ -705,19 +746,24 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
             tick // subscribe to live-stroke changes
             drawIntoCanvas { cv ->
                 val n = cv.nativeCanvas
-                val k = size.width / PAGE_W
+                val k = ke()
                 val w = size.width.toInt(); val h = size.height.toInt()
                 if (w <= 0 || h <= 0) return@drawIntoCanvas
-                val (bmp, top) = cache.update(w, h, k, pages[cur].items, erased, hidden, cur, scrollY, note.bg, store::bitmap)
-                n.drawBitmap(bmp, 0f, (top - scrollY) * k, null)
+                val bmp = cache.update(w, h, k, zoom > 1.001f, pages[cur].items, erased, hidden, cur, panX, scrollY, note.bg, pinching, store::bitmap)
+                n.save()
+                n.translate((cache.left - panX) * k, (cache.top - scrollY) * k)
+                val r = k / cache.scale // 1 when the bitmap was rendered at this zoom; otherwise it is stretched until the pinch ends
+                n.scale(r, r)
+                n.drawBitmap(bmp, 0f, 0f, bmpPaint)
+                n.restore()
                 if (live.isNotEmpty() && tool != ERASER) {
-                    n.save(); n.scale(k, k); n.translate(0f, -scrollY)
+                    n.save(); n.scale(k, k); n.translate(-panX, -scrollY)
                     drawStroke(n, Stroke(tool, colors[tool], widths[tool], live.toFloatArray()))
                     n.restore()
                 }
                 val pv = preview
                 if (pv != null) { // the shape/image being drawn, moved or resized
-                    n.save(); n.scale(k, k); n.translate(0f, -scrollY)
+                    n.save(); n.scale(k, k); n.translate(-panX, -scrollY)
                     drawItem(n, pv, store::bitmap)
                     n.restore()
                 }
@@ -730,15 +776,15 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
                         val fr = frameOf(framed)
                         if (fr != null) { // boxes: dashed frame turned with the item, and a link from the corner to the rotate handle
                             n.save()
-                            n.rotate(Math.toDegrees(fr[4].toDouble()).toFloat(), (fr[0] + fr[2]) / 2 * k, ((fr[1] + fr[3]) / 2 - scrollY) * k)
+                            n.rotate(Math.toDegrees(fr[4].toDouble()).toFloat(), ((fr[0] + fr[2]) / 2 - panX) * k, ((fr[1] + fr[3]) / 2 - scrollY) * k)
                             selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(8f * dp, 6f * dp), 0f)
-                            n.drawRect(fr[0] * k, (fr[1] - scrollY) * k, fr[2] * k, (fr[3] - scrollY) * k, selPaint)
+                            n.drawRect((fr[0] - panX) * k, (fr[1] - scrollY) * k, (fr[2] - panX) * k, (fr[3] - scrollY) * k, selPaint)
                             selPaint.pathEffect = null
                             n.restore()
-                            n.drawLine(hs[3].first * k, (hs[3].second - scrollY) * k, hs[4].first * k, (hs[4].second - scrollY) * k, selPaint)
+                            n.drawLine((hs[3].first - panX) * k, (hs[3].second - scrollY) * k, (hs[4].first - panX) * k, (hs[4].second - scrollY) * k, selPaint)
                         }
                         hs.forEachIndexed { idx, (hx, hy) ->
-                            val cx = hx * k; val cy = (hy - scrollY) * k
+                            val cx = (hx - panX) * k; val cy = (hy - scrollY) * k
                             val rotate = fr != null && idx == 4 // filled blue with a small arc, so it reads as "turn"
                             selPaint.style = android.graphics.Paint.Style.FILL; selPaint.color = if (rotate) SEL else 0xFFFFFFFF.toInt()
                             n.drawCircle(cx, cy, 9f * dp, selPaint)
@@ -757,30 +803,55 @@ fun InkEditor(store: Store, note: Note, onBack: () -> Unit) {
             var tf by remember { mutableStateOf(TextFieldValue(e.text, TextRange(e.text.length))) }
             LaunchedEffect(Unit) { delay(120); runCatching { focus.requestFocus() }; keyboard?.show() }
             // keep the box above the keyboard while typing
-            LaunchedEffect(viewH, e.h, e.y) {
+            LaunchedEffect(viewH, e.h, e.y, e.x) {
                 if (viewH > 0) {
-                    val bottom = (e.y + e.h - scrollY) * kPx
+                    val k = ke()
+                    val bottom = (e.y + e.h - scrollY) * k
                     val room = viewH - 24 * d.density
-                    if (bottom > room) scrollY += (bottom - room) / kPx
+                    if (bottom > room) scrollY += (bottom - room) / k
                     if (e.y - scrollY < 0f) scrollY = e.y
+                    if (e.x < panX) panX = e.x.coerceAtLeast(0f)
                 }
             }
             BasicTextField(
                 tf, { tf = it; if (it.text != editing?.text) editing = editing?.copy(text = it.text) },
-                Modifier.offset { IntOffset((e.x * kPx).roundToInt(), ((e.y - scrollY) * kPx).roundToInt()) }
-                    .width(with(d) { (e.w * kPx).toDp() })
+                // the box is measured at its exact on-screen width (it can be wider than the view when zoomed in) and placed exactly where the
+                // page draws it; offset/requiredWidth would shift it, because they centre a child that is wider than the space it is given
+                Modifier.layout { measurable, constraints ->
+                    val k = ke()
+                    val placeable = measurable.measure(Constraints.fixedWidth((e.w * k).roundToInt().coerceAtLeast(1)))
+                    layout(constraints.maxWidth, constraints.maxHeight) {
+                        placeable.place(((e.x - panX) * k).roundToInt(), ((e.y - scrollY) * k).roundToInt())
+                    }
+                }
                     .graphicsLayer { rotationZ = Math.toDegrees(e.rot.toDouble()).toFloat() }
                     .border(1.5.dp, Color(SEL))
                     .focusRequester(focus)
                     .semantics { contentDescription = "Text box" },
                 textStyle = TextStyle(
-                    fontFamily = FontFamily(fontFace(e.font, e.flags)), fontSize = with(d) { (e.size * kPx).toSp() }, color = Color(e.color),
+                    fontFamily = FontFamily(fontFace(e.font, e.flags)), fontSize = with(d) { (e.size * ke()).toSp() }, color = Color(e.color),
                     textAlign = when (e.align) { 1 -> TextAlign.Center; 2 -> TextAlign.End; else -> TextAlign.Start },
                     textDecoration = if (e.flags and 4 != 0) TextDecoration.Underline else null,
                 ),
                 cursorBrush = SolidColor(Color(e.color)),
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences), // capital first letter, like every other name box
             )
+        }
+        if (zoom > 1.01f) {
+            val pct = (zoom * 100).roundToInt()
+            Surface(
+                onClick = { zoom = 1f; panX = 0f; tick++ },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp).heightIn(min = 48.dp)
+                    .semantics { contentDescription = "Zoom $pct percent. Tap to reset to 100 percent" },
+                shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.onSurface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), shadowElevation = 3.dp,
+            ) {
+                Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.FitScreen, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("$pct%", fontSize = 15.sp)
+                }
+            }
         }
         }
     }
