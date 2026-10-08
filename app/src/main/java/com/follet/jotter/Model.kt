@@ -87,13 +87,45 @@ class Shape(
     ) = Shape(kind, color, fill, width, x1, y1, x2, y2, rot)
 }
 
-/** Font families a text box can use: Android family name and the label shown to the user. */
-val FONTS = listOf("sans-serif" to "Sans", "serif" to "Serif", "monospace" to "Monospace", "cursive" to "Handwriting", "casual" to "Casual")
-
-fun fontFace(font: Int, flags: Int): android.graphics.Typeface = android.graphics.Typeface.create(
-    FONTS[font.coerceIn(0, FONTS.lastIndex)].first,
-    when (flags and 3) { 1 -> android.graphics.Typeface.BOLD; 2 -> android.graphics.Typeface.ITALIC; 3 -> android.graphics.Typeface.BOLD_ITALIC; else -> android.graphics.Typeface.NORMAL },
+/**
+ * Font families a text box can use: a system family name, or "asset:<name>" for a font bundled in assets/fonts, and the label shown
+ * to the user. The position in this list is what a saved text box stores, so keep the order.
+ */
+val FONTS = listOf(
+    "asset:OpenSans" to "Open Sans", "serif" to "Serif", "monospace" to "Monospace", "cursive" to "Handwriting", "asset:GochiHand" to "Gochi Hand",
 )
+
+/** Loads the bundled fonts once. Set up from [Store], used from the UI thread and the export thread. */
+object BundledFonts {
+    @Volatile var assets: android.content.res.AssetManager? = null
+    private val cache = HashMap<String, android.graphics.Typeface>()
+
+    @Synchronized fun get(name: String, flags: Int): android.graphics.Typeface = cache.getOrPut("$name/${flags and 3}") {
+        val am = assets
+        val bold = flags and 1 != 0; val italic = flags and 2 != 0
+        runCatching {
+            when (name) {
+                // Open Sans ships as two variable fonts (upright and italic) with a weight axis; Android 8+ can set it
+                "OpenSans" -> android.graphics.Typeface.Builder(am!!, if (italic) "fonts/OpenSans-Italic.ttf" else "fonts/OpenSans-Roman.ttf")
+                    .setFontVariationSettings("'wght' ${if (bold) 700 else 400}, 'wdth' 100").build()!!
+                // single-weight font: bold and italic are synthesised by Android
+                else -> android.graphics.Typeface.create(
+                    android.graphics.Typeface.createFromAsset(am!!, "fonts/$name-Regular.ttf"),
+                    if (bold && italic) android.graphics.Typeface.BOLD_ITALIC else if (bold) android.graphics.Typeface.BOLD else if (italic) android.graphics.Typeface.ITALIC else android.graphics.Typeface.NORMAL,
+                )
+            }
+        }.getOrElse { android.graphics.Typeface.create("sans-serif", if (bold && italic) android.graphics.Typeface.BOLD_ITALIC else if (bold) android.graphics.Typeface.BOLD else if (italic) android.graphics.Typeface.ITALIC else android.graphics.Typeface.NORMAL) }
+    }
+}
+
+fun fontFace(font: Int, flags: Int): android.graphics.Typeface {
+    val family = FONTS[font.coerceIn(0, FONTS.lastIndex)].first
+    if (family.startsWith("asset:")) return BundledFonts.get(family.removePrefix("asset:"), flags)
+    return android.graphics.Typeface.create(
+        family,
+        when (flags and 3) { 1 -> android.graphics.Typeface.BOLD; 2 -> android.graphics.Typeface.ITALIC; 3 -> android.graphics.Typeface.BOLD_ITALIC; else -> android.graphics.Typeface.NORMAL },
+    )
+}
 
 /**
  * A text box on the page. [flags]: 1 bold, 2 italic, 4 underline. [align]: 0 left, 1 centre, 2 right. [size] (font size) and
@@ -135,6 +167,7 @@ data class Note(
 data class Folder(val id: String, val name: String)
 
 class Store(private val ctx: Context) {
+    init { BundledFonts.assets = ctx.assets }
     private val dir = File(ctx.filesDir, "notes").apply { mkdirs() }
     private val imgDir = File(ctx.filesDir, "img").apply { mkdirs() }
     val prefs = ctx.getSharedPreferences("jotter", 0)

@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- artwork from docs/app-icon.svg: the "J" (Coiny, converted to an outline) and three dots -->
+    <group android:scaleX="2.9726" android:scaleY="2.9726" android:translateX="24.000" android:translateY="29.599">
+        <path android:fillColor="#FF000000" android:pathData="M4.247 12.347Q4.247 12.92 4.583 13.256Q4.919 13.592 5.334 13.592Q5.828 13.592 6.045 13.325Q6.263 13.058 6.263 12.347V5.117Q6.263 3.912 6.786 3.329Q7.31 2.746 8.515 2.746Q9.581 2.746 10.194 3.24Q10.806 3.734 10.806 4.939V12.268Q10.806 14.441 9.493 15.429Q8.179 16.417 5.63 16.417Q4.82 16.417 4.129 16.298Q3.437 16.18 2.904 15.972Q2.371 15.765 1.926 15.488Q1.482 15.212 1.175 14.876Q0.869 14.54 0.632 14.175Q0.395 13.809 0.267 13.424Q0.138 13.039 0.069 12.693Q-0 12.347 -0 11.992Q-0 10.668 0.444 10.184Q0.889 9.7 2.193 9.7Q3.24 9.7 3.803 10.075Q4.366 10.451 4.366 11.103Q4.366 11.3 4.307 11.735Q4.247 12.169 4.247 12.347Z" />
+        <path android:fillColor="#FFFFCC00" android:pathData="M14.063,2.606a2.606,2.606 0 1,0 5.211,0a2.606,2.606 0 1,0 -5.211,0z" />
+        <path android:fillColor="#FF0000FF" android:pathData="M16.276,8.717a1.954,1.954 0 1,0 3.908,0a1.954,1.954 0 1,0 -3.908,0z" />
+        <path android:fillColor="#FFD40000" android:pathData="M11.581,7.72a1.466,1.466 0 1,0 2.931,0a1.466,1.466 0 1,0 -2.931,0z" />
+    </group>
+</vector>
