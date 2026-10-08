@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -17,14 +18,18 @@ import java.util.UUID
 /** Pages are a fixed 1000 units wide (scaled to the screen) and infinitely tall. */
 const val PAGE_W = 1000f
 
-sealed class Item
+/** Vertical extent in page units, used to skip off-screen items and to size exports. */
+sealed class Item {
+    abstract val minY: Float
+    abstract val maxY: Float
+}
 
 /** tool: 0 pen, 1 highlighter, 2 calligraphic pen. pts = x, y, pressure triples in page units. */
 class Stroke(val tool: Int, val color: Int, val width: Float, val pts: FloatArray) : Item() {
     val n get() = pts.size / 3
     val varies = (2 until pts.size step 3).any { pts[it] != 1f }
-    val minY = (1 until pts.size step 3).minOf { pts[it] } - width
-    val maxY = (1 until pts.size step 3).maxOf { pts[it] } + width
+    override val minY = (1 until pts.size step 3).minOf { pts[it] } - width
+    override val maxY = (1 until pts.size step 3).maxOf { pts[it] } + width
     val path by lazy {
         android.graphics.Path().apply {
             moveTo(pts[0], pts[1])
@@ -51,19 +56,98 @@ class Stroke(val tool: Int, val color: Int, val width: Float, val pts: FloatArra
     }
 }
 
-class Img(val file: String, val x: Float, val y: Float, val w: Float, val h: Float) : Item()
+/** rot: radians, clockwise, around the image centre. */
+class Img(val file: String, val x: Float, val y: Float, val w: Float, val h: Float, val rot: Float = 0f) : Item() {
+    private val reach get() = if (rot == 0f) h / 2 else kotlin.math.hypot(w, h) / 2 // half height of the (rotated) bounds, conservatively
+    override val minY get() = y + h / 2 - reach
+    override val maxY get() = y + h / 2 + reach
+}
+
+/**
+ * kind: 0 rectangle, 1 ellipse, 2 triangle, 3 line, 4 arrow, 5 five-point star, 6 burst (spiky ellipse). Defined by two corner points (for lines: the two ends).
+ * color is the border (ARGB, 0 = no border), fill is ARGB (0 = no fill). rot (radians, clockwise, around the box centre) turns
+ * boxes; lines are turned by moving their ends. Immutable; editing makes a copy so undo can keep the old one.
+ */
+class Shape(
+    val kind: Int, val color: Int, val fill: Int, val width: Float,
+    val x1: Float, val y1: Float, val x2: Float, val y2: Float, val rot: Float = 0f,
+) : Item() {
+    val left get() = minOf(x1, x2)
+    val right get() = maxOf(x1, x2)
+    val top get() = minOf(y1, y2)
+    val bottom get() = maxOf(y1, y2)
+    val isLine get() = kind == 3 || kind == 4
+    private val reach get() = // half height of the (rotated) bounds, conservatively, plus border and arrow heads
+        (if (rot == 0f || isLine) (bottom - top) / 2 else kotlin.math.hypot(right - left, bottom - top) / 2) + width + (if (kind == 4) 40f else 0f)
+    override val minY get() = (top + bottom) / 2 - reach
+    override val maxY get() = (top + bottom) / 2 + reach
+    fun copy(
+        kind: Int = this.kind, color: Int = this.color, fill: Int = this.fill, width: Float = this.width,
+        x1: Float = this.x1, y1: Float = this.y1, x2: Float = this.x2, y2: Float = this.y2, rot: Float = this.rot,
+    ) = Shape(kind, color, fill, width, x1, y1, x2, y2, rot)
+}
 
 /** kind: "text" or "ink". bg: id from [BACKGROUNDS]. */
 data class Note(
     val id: String, val title: String, val kind: String, val bg: String,
     val created: Long, val modified: Long, val archived: Boolean = false,
+    val folder: String = "", // id of the folder it is in, "" = none
+    val starred: Boolean = false,
 )
+
+/** A flat list of folders: no folders inside folders. */
+data class Folder(val id: String, val name: String)
 
 class Store(private val ctx: Context) {
     private val dir = File(ctx.filesDir, "notes").apply { mkdirs() }
     private val imgDir = File(ctx.filesDir, "img").apply { mkdirs() }
     val prefs = ctx.getSharedPreferences("jotter", 0)
     val notes = mutableStateListOf<Note>()
+    val exporter = Exporter(ctx, this)
+
+    val folders = mutableStateListOf<Folder>()
+    private val foldersFile = File(ctx.filesDir, "folders.json")
+    init { loadFolders() }
+
+    private fun loadFolders() {
+        folders.clear()
+        runCatching { JSONArray(foldersFile.readText()) }.getOrNull()?.let { a ->
+            for (i in 0 until a.length()) a.getJSONObject(i).let { folders += Folder(it.getString("id"), it.getString("name")) }
+        }
+    }
+
+    private fun saveFolders() {
+        foldersFile.writeText(JSONArray().apply { folders.forEach { put(JSONObject().put("id", it.id).put("name", it.name)) } }.toString())
+        exporter.touch(null)
+    }
+
+    fun addFolder(name: String): Folder = Folder(UUID.randomUUID().toString(), name).also { folders += it; saveFolders() }
+
+    fun renameFolder(f: Folder, name: String) {
+        val i = folders.indexOfFirst { it.id == f.id }
+        if (i >= 0) { folders[i] = f.copy(name = name); saveFolders() }
+    }
+
+    /**
+     * Removes the folder. Its notes are kept (moved out of any folder) unless [withNotes]; then the visible ones are trashed and
+     * returned so the caller can offer Undo. Archived notes are never deleted this way.
+     */
+    fun deleteFolder(f: Folder, withNotes: Boolean = false): List<Note> {
+        val inside = notes.filter { it.folder == f.id }
+        val doomed = if (withNotes) inside.filter { !it.archived } else emptyList()
+        doomed.forEach { trash(it) }
+        (inside - doomed.toSet()).forEach { save(it.copy(folder = "")) }
+        folders.removeAll { it.id == f.id }
+        saveFolders()
+        return doomed
+    }
+
+    /** Undo of [deleteFolder] with notes. */
+    fun restoreFolder(f: Folder, notes: List<Note>) {
+        if (folders.none { it.id == f.id }) folders += f
+        saveFolders()
+        notes.forEach { restore(it) }
+    }
 
     /** Toolbox position: top, bottom, left or right. */
     var toolsPos by mutableStateOf(prefs.getString("pos", "top")!!); private set
@@ -75,29 +159,33 @@ class Store(private val ctx: Context) {
     fun pickTheme(v: String) { theme = v; prefs.edit().putString("theme", v).apply() }
     fun pickFingerDraw(v: Boolean) { fingerDraw = v; prefs.edit().putBoolean("finger", v).apply() }
 
-    init {
+    init { reload() }
+
+    fun reload() {
+        notes.clear()
         notes += dir.listFiles { f -> f.extension == "meta" }.orEmpty().mapNotNull {
             runCatching {
                 JSONObject(it.readText()).run {
                     Note(getString("id"), getString("title"), getString("kind"), getString("bg"),
-                        getLong("created"), getLong("modified"), optBoolean("archived"))
+                        getLong("created"), getLong("modified"), optBoolean("archived"), optString("folder"), optBoolean("starred"))
                 }
             }.getOrNull()
         }
     }
 
-    fun create(kind: String, bg: String): Note {
+    fun create(kind: String, bg: String, folder: String = ""): Note {
         val now = System.currentTimeMillis()
         if (kind == "ink") { lastBg = bg; prefs.edit().putString("bg", bg).apply() }
-        return Note(UUID.randomUUID().toString(), "", kind, bg, now, now).also { save(it) }
+        return Note(UUID.randomUUID().toString(), "", kind, bg, now, now, folder = folder).also { save(it) }
     }
 
     fun save(n: Note) {
         File(dir, "${n.id}.meta").writeText(JSONObject().put("id", n.id).put("title", n.title)
             .put("kind", n.kind).put("bg", n.bg).put("created", n.created)
-            .put("modified", n.modified).put("archived", n.archived).toString())
+            .put("modified", n.modified).put("archived", n.archived).put("folder", n.folder).put("starred", n.starred).toString())
         val i = notes.indexOfFirst { it.id == n.id }
         if (i >= 0) notes[i] = n else notes += n
+        exporter.touch(n.id)
     }
 
     fun delete(n: Note) {
@@ -110,12 +198,67 @@ class Store(private val ctx: Context) {
     fun trash(n: Note) {
         dir.listFiles { f -> f.name.startsWith(n.id) }?.forEach { it.renameTo(File(trashDir, it.name)) }
         notes.removeAll { it.id == n.id }
+        exporter.touch(null)
     }
     fun restore(n: Note) {
         trashDir.listFiles { f -> f.name.startsWith(n.id) }?.forEach { it.renameTo(File(dir, it.name)) }
         if (notes.none { it.id == n.id }) notes += n
+        exporter.touch(null)
     }
     fun purge(n: Note) { trashDir.listFiles { f -> f.name.startsWith(n.id) }?.forEach { it.delete() } }
+
+    /** All drawings (metadata, strokes, thumbnails, text) and their images as one zip, the .jotter backup. */
+    fun backupTo(out: java.io.OutputStream) {
+        java.util.zip.ZipOutputStream(out.buffered()).use { z ->
+            fun add(prefix: String, f: File) {
+                z.putNextEntry(java.util.zip.ZipEntry(prefix + f.name)); f.inputStream().use { it.copyTo(z) }; z.closeEntry()
+            }
+            dir.listFiles { f -> f.isFile && f.extension in setOf("meta", "body", "txt", "png") }.orEmpty().forEach { add("notes/", it) }
+            imgDir.listFiles { f -> f.isFile }.orEmpty().forEach { add("img/", it) }
+            if (foldersFile.exists()) { z.putNextEntry(java.util.zip.ZipEntry("folders.json")); foldersFile.inputStream().use { it.copyTo(z) }; z.closeEntry() }
+        }
+    }
+
+    /**
+     * Adds the notes of a .jotter backup. A note that already exists is replaced only when the backup's copy is newer.
+     * Returns (restored, skipped).
+     */
+    fun restoreFrom(input: java.io.InputStream): Pair<Int, Int> {
+        val tmp = File(ctx.cacheDir, "restore").apply { deleteRecursively(); mkdirs() }
+        java.util.zip.ZipInputStream(input.buffered()).use { z ->
+            while (true) {
+                val e = z.nextEntry ?: break
+                if (e.name == "folders.json") { File(tmp, "folders.json").outputStream().use { z.copyTo(it) }; continue }
+                val parts = e.name.split('/')
+                if (e.isDirectory || parts.size != 2 || parts[0] !in setOf("notes", "img") || parts[1].isEmpty() || parts[1].startsWith(".")) continue
+                File(tmp, parts[0]).mkdirs()
+                File(File(tmp, parts[0]), parts[1]).outputStream().use { z.copyTo(it) } // flat names only, so nothing can escape the folder
+            }
+        }
+        var restored = 0; var skipped = 0
+        val idOk = Regex("[0-9a-fA-F-]{36}")
+        File(tmp, "notes").listFiles { f -> f.extension == "meta" }.orEmpty().forEach { m ->
+            val meta = runCatching { JSONObject(m.readText()) }.getOrNull() ?: return@forEach
+            val id = meta.optString("id")
+            if (!idOk.matches(id)) return@forEach
+            val have = notes.firstOrNull { it.id == id }
+            if (have != null && have.modified >= meta.optLong("modified")) { skipped++; return@forEach }
+            File(tmp, "notes").listFiles { f -> f.name.startsWith("$id.") }.orEmpty().forEach { it.copyTo(File(dir, it.name), overwrite = true) }
+            restored++
+        }
+        File(tmp, "img").listFiles().orEmpty().forEach { val t = File(imgDir, it.name); if (!t.exists()) it.copyTo(t) }
+        runCatching { JSONArray(File(tmp, "folders.json").readText()) }.getOrNull()?.let { a -> // folders the backup has and we lack
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i); val id = o.getString("id")
+                if (idOk.matches(id) && folders.none { it.id == id }) folders += Folder(id, o.getString("name"))
+            }
+            saveFolders()
+        }
+        tmp.deleteRecursively()
+        reload()
+        exporter.touch(null)
+        return restored to skipped
+    }
 
     fun thumbFile(n: Note) = File(dir, "${n.id}.png")
 
@@ -129,14 +272,26 @@ class Store(private val ctx: Context) {
             DataInputStream(f.inputStream().buffered()).use { i ->
                 List(i.readInt()) {
                     List(i.readInt()) {
-                        if (i.readByte().toInt() == 0) {
-                            val tool = i.readByte().toInt(); val color = i.readInt(); val w = i.readFloat()
-                            Stroke(tool, color, w, FloatArray(i.readInt()) { i.readFloat() })
-                        } else Img(i.readUTF(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                        when (i.readByte().toInt()) {
+                            0 -> {
+                                val tool = i.readByte().toInt(); val color = i.readInt(); val w = i.readFloat()
+                                Stroke(tool, color, w, FloatArray(i.readInt()) { i.readFloat() })
+                            }
+                            1 -> Img(i.readUTF(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                            4 -> Img(i.readUTF(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                            2 -> Shape(i.readByte().toInt(), i.readInt(), i.readInt(), i.readFloat(),
+                                i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                            else -> Shape(i.readByte().toInt(), i.readInt(), i.readInt(), i.readFloat(),
+                                i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat(), i.readFloat())
+                        }
                     }
                 }
             }
-        }.getOrDefault(emptyList())
+        }.getOrElse { e -> // never let an unreadable body be silently overwritten by an empty page: keep a copy
+            android.util.Log.e("Jotter", "could not read ${f.name}", e)
+            runCatching { f.copyTo(File(dir, "${n.id}.bad"), overwrite = true) }
+            emptyList()
+        }
     }
 
     fun writePages(n: Note, pages: List<List<Item>>) {
@@ -152,8 +307,12 @@ class Store(private val ctx: Context) {
                         item.pts.forEach { o.writeFloat(it) }
                     }
                     is Img -> {
-                        o.writeByte(1); o.writeUTF(item.file)
-                        o.writeFloat(item.x); o.writeFloat(item.y); o.writeFloat(item.w); o.writeFloat(item.h)
+                        o.writeByte(4); o.writeUTF(item.file)
+                        o.writeFloat(item.x); o.writeFloat(item.y); o.writeFloat(item.w); o.writeFloat(item.h); o.writeFloat(item.rot)
+                    }
+                    is Shape -> {
+                        o.writeByte(3); o.writeByte(item.kind); o.writeInt(item.color); o.writeInt(item.fill); o.writeFloat(item.width)
+                        o.writeFloat(item.x1); o.writeFloat(item.y1); o.writeFloat(item.x2); o.writeFloat(item.y2); o.writeFloat(item.rot)
                     }
                 }
             }
@@ -179,6 +338,7 @@ class Store(private val ctx: Context) {
     }.getOrNull()
 
     private val bitmaps = HashMap<String, Bitmap?>()
+    @Synchronized // also called from the export thread
     fun bitmap(name: String): Bitmap? = bitmaps.getOrPut(name) {
         val f = File(imgDir, name)
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }

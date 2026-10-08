@@ -15,10 +15,17 @@ import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 
 class MainActivity : ComponentActivity() {
+    private lateinit var store: Store
+
+    override fun onStop() {
+        super.onStop()
+        store.exporter.flushNow()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val store = Store(applicationContext)
+        store = Store(applicationContext)
         setContent {
             val dark = when (store.theme) { "dark" -> true; "light" -> false; else -> isSystemInDarkTheme() }
             SideEffect { // status/navigation bar icons must follow the in-app theme, not only the system one
